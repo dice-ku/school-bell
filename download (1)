@@ -1,0 +1,668 @@
+// src/App.tsx
+import React, { useState, useEffect } from 'react';
+import { 
+  FacilitySettings as IFacilitySettings, 
+  Staff, 
+  ShiftCategory, 
+  MonthlyRosterData, 
+  MonthlyOnCallData, 
+  DailyComplianceResult, 
+  MonthlyFteResult,
+  ShiftRequest
+} from './types';
+import { 
+  getDefaultFacilitySettings, 
+  getDefaultStaffList, 
+  getDefaultShiftCategories, 
+  getSampleRosterData, 
+  getSampleOnCallData,
+  getSampleShiftRequests
+} from './utils/sampleData';
+import { calculateMonthlyCompliance } from './utils/staffingCalc';
+import { calculateMonthlyFte } from './utils/fteCalc';
+
+// コンポーネント群インポート
+import Dashboard from './components/Dashboard';
+import FacilitySettings from './components/FacilitySettings';
+import StaffMaster from './components/StaffMaster';
+import ShiftCategoryMaster from './components/ShiftCategoryMaster';
+import MonthlyRoster from './components/MonthlyRoster';
+import DailyCompliance from './components/DailyCompliance';
+import FTECalculation from './components/FTECalculation';
+import OnCallLog from './components/OnCallLog';
+import OnCallReport from './components/OnCallReport';
+import ExcelExport from './components/ExcelExport';
+import ShiftGeneratorDraft from './components/ShiftGeneratorDraft';
+import ShiftRequestsManager from './components/ShiftRequestsManager';
+
+import { 
+  LayoutDashboard, 
+  Sliders, 
+  Users, 
+  Tags, 
+  Calendar, 
+  ShieldAlert, 
+  CheckSquare, 
+  PhoneCall, 
+  FileSpreadsheet, 
+  Printer,
+  Sparkles,
+  ChevronLeft,
+  ChevronRight,
+  ChevronsLeft,
+  ChevronsRight
+} from 'lucide-react';
+
+export default function App() {
+  // 1. 対象年月 (初期値: メタデータ時刻である2026年6月 "2026-06")
+  const [targetYearMonth, setTargetYearMonth] = useState<string>('2026-06');
+
+  // 年月操作用のハンドラ
+  const handlePrevMonth = () => {
+    const [y, m] = targetYearMonth.split('-').map(Number);
+    const date = new Date(y, m - 2, 1);
+    const newY = date.getFullYear();
+    const newM = String(date.getMonth() + 1).padStart(2, '0');
+    setTargetYearMonth(`${newY}-${newM}`);
+  };
+
+  const handleNextMonth = () => {
+    const [y, m] = targetYearMonth.split('-').map(Number);
+    const date = new Date(y, m, 1);
+    const newY = date.getFullYear();
+    const newM = String(date.getMonth() + 1).padStart(2, '0');
+    setTargetYearMonth(`${newY}-${newM}`);
+  };
+
+  const handlePrevYear = () => {
+    const [y, m] = targetYearMonth.split('-');
+    const newY = Number(y) - 1;
+    setTargetYearMonth(`${newY}-${m}`);
+  };
+
+  const handleNextYear = () => {
+    const [y, m] = targetYearMonth.split('-');
+    const newY = Number(y) + 1;
+    setTargetYearMonth(`${newY}-${m}`);
+  };
+  
+  // 2. 基本マスタデータ（月を跨いで共通でよいもの）
+  const [staffList, setStaffList] = useState<Staff[]>([]);
+  const [shifts, setShifts] = useState<ShiftCategory[]>([]);
+  
+  // 3. 対象年月依存データ
+  const [settings, setSettings] = useState<IFacilitySettings | null>(null);
+  const [rosters, setRosters] = useState<Record<string, MonthlyRosterData>>({});
+  const [onCallData, setOnCallData] = useState<MonthlyOnCallData | null>(null);
+  const [requests, setRequests] = useState<ShiftRequest[]>([]);
+
+  // 4. 計算結果データのキャッシュ
+  const [complianceResults, setComplianceResults] = useState<DailyComplianceResult[]>([]);
+  const [fteResult, setFteResult] = useState<MonthlyFteResult | null>(null);
+
+  // 5. アプリケーションコントロール
+  const [activeTab, setActiveTab] = useState<string>('dashboard');
+  const [isActualMode, setIsActualMode] = useState<boolean>(true); // 実績モード (監査突合が基本)
+  const [userRole, setUserRole] = useState<'Admin' | 'Manager' | 'Staff' | 'Viewer'>('Admin');
+
+  // ロールベースアクセスの初期読み込み
+  useEffect(() => {
+    const savedRole = localStorage.getItem('roster_app_user_role');
+    if (savedRole && ['Admin', 'Manager', 'Staff', 'Viewer'].includes(savedRole)) {
+      setUserRole(savedRole as any);
+    }
+  }, []);
+
+  const handleUpdateRole = (role: 'Admin' | 'Manager' | 'Staff' | 'Viewer') => {
+    setUserRole(role);
+    localStorage.setItem('roster_app_user_role', role);
+  };
+
+  // 【初期化＆切り替えライフサイクル】
+  useEffect(() => {
+    // 共通マスタ読み込み
+    const localStaff = localStorage.getItem('roster_app_staffList');
+    if (localStaff) {
+      setStaffList(JSON.parse(localStaff));
+    } else {
+      const defaultStaff = getDefaultStaffList();
+      setStaffList(defaultStaff);
+      localStorage.setItem('roster_app_staffList', JSON.stringify(defaultStaff));
+    }
+
+    const localShifts = localStorage.getItem('roster_app_shifts');
+    if (localShifts) {
+      setShifts(JSON.parse(localShifts));
+    } else {
+      const defaultShifts = getDefaultShiftCategories();
+      setShifts(defaultShifts);
+      localStorage.setItem('roster_app_shifts', JSON.stringify(defaultShifts));
+    }
+  }, []);
+
+  // 対象年月が変更された場合に、年月固有のローカルストレージデータをロード、無ければサンプル生成
+  useEffect(() => {
+    const settingsKey = `roster_app_settings_${targetYearMonth}`;
+    const rostersKey = `roster_app_rosters_${targetYearMonth}`;
+    const onCallKey = `roster_app_oncall_${targetYearMonth}`;
+
+    // A. 施設設定
+    const localSettings = localStorage.getItem(settingsKey);
+    let currentSettings: IFacilitySettings;
+    if (localSettings) {
+      currentSettings = JSON.parse(localSettings);
+    } else {
+      currentSettings = getDefaultFacilitySettings(targetYearMonth);
+      localStorage.setItem(settingsKey, JSON.stringify(currentSettings));
+    }
+    setSettings(currentSettings);
+
+    // B. シフト予定・実績 rosters
+    const localRosters = localStorage.getItem(rostersKey);
+    let currentRosters: Record<string, MonthlyRosterData>;
+    if (localRosters) {
+      currentRosters = JSON.parse(localRosters);
+    } else {
+      currentRosters = getSampleRosterData(targetYearMonth);
+      localStorage.setItem(rostersKey, JSON.stringify(currentRosters));
+    }
+    setRosters(currentRosters);
+
+    // C. オンコール記録
+    const localOnCall = localStorage.getItem(onCallKey);
+    let currentOnCall: MonthlyOnCallData;
+    if (localOnCall) {
+      currentOnCall = JSON.parse(localOnCall);
+    } else {
+      currentOnCall = getSampleOnCallData(targetYearMonth);
+      localStorage.setItem(onCallKey, JSON.stringify(currentOnCall));
+    }
+    setOnCallData(currentOnCall);
+
+    // D. 希望申請
+    const requestsKey = `roster_app_requests_${targetYearMonth}`;
+    const localRequests = localStorage.getItem(requestsKey);
+    let currentRequests: ShiftRequest[];
+    if (localRequests) {
+      currentRequests = JSON.parse(localRequests);
+    } else {
+      currentRequests = getSampleShiftRequests(targetYearMonth);
+      localStorage.setItem(requestsKey, JSON.stringify(currentRequests));
+    }
+    setRequests(currentRequests);
+
+  }, [targetYearMonth]);
+
+  // 設定やシフト、マスタが変更されたらローダを走らせて適合計算結果を更新＆保存
+  useEffect(() => {
+    if (!settings || !rosters || !onCallData || staffList.length === 0 || shifts.length === 0) return;
+
+    // 1. 日別実配置計算
+    const dailyComp = calculateMonthlyCompliance(
+      settings,
+      staffList,
+      shifts,
+      rosters,
+      onCallData,
+      isActualMode
+    );
+    setComplianceResults(dailyComp);
+
+    // 2. 月間常勤換算(FTE)計算
+    const monthlyFte = calculateMonthlyFte(
+      settings,
+      staffList,
+      shifts,
+      rosters,
+      onCallData
+    );
+    setFteResult(monthlyFte);
+
+  }, [settings, rosters, onCallData, staffList, shifts, isActualMode]);
+
+  // -- 各種書き込みハンドラ --
+  const handleUpdateSettings = (newSettings: IFacilitySettings) => {
+    setSettings(newSettings);
+    localStorage.setItem(`roster_app_settings_${newSettings.targetYearMonth}`, JSON.stringify(newSettings));
+    if (newSettings.targetYearMonth !== targetYearMonth) {
+      setTargetYearMonth(newSettings.targetYearMonth);
+    }
+  };
+
+  const handleUpdateStaff = (newStaff: Staff[]) => {
+    setStaffList(newStaff);
+    localStorage.setItem('roster_app_staffList', JSON.stringify(newStaff));
+  };
+
+  const handleUpdateShifts = (newShifts: ShiftCategory[]) => {
+    setShifts(newShifts);
+    localStorage.setItem('roster_app_shifts', JSON.stringify(newShifts));
+  };
+
+  const handleUpdateRosters = (newRosters: Record<string, MonthlyRosterData>) => {
+    setRosters(newRosters);
+    localStorage.setItem(`roster_app_rosters_${targetYearMonth}`, JSON.stringify(newRosters));
+  };
+
+  const handleUpdateOnCall = (newOnCall: MonthlyOnCallData) => {
+    setOnCallData(newOnCall);
+    localStorage.setItem(`roster_app_oncall_${targetYearMonth}`, JSON.stringify(newOnCall));
+  };
+
+  const handleUpdateRequests = (newRequests: ShiftRequest[]) => {
+    setRequests(newRequests);
+    localStorage.setItem(`roster_app_requests_${targetYearMonth}`, JSON.stringify(newRequests));
+    
+    // 全データ保存
+    const commonRequestsKey = 'roster_app_requests';
+    const commonRequestsRaw = localStorage.getItem(commonRequestsKey);
+    let allRequests: ShiftRequest[] = [];
+    try {
+      if (commonRequestsRaw) {
+        allRequests = JSON.parse(commonRequestsRaw).filter((r: ShiftRequest) => r.targetMonth !== targetYearMonth);
+      }
+    } catch (e) {}
+    allRequests = [...allRequests, ...newRequests];
+    localStorage.setItem(commonRequestsKey, JSON.stringify(allRequests));
+  };
+
+  // 工場出荷リセット
+  const resetAllToDefault = () => {
+    localStorage.clear();
+    location.reload();
+  };
+
+  // ロード中プレースホルダ
+  if (!settings || !onCallData || !fteResult) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center">
+        <div className="text-center space-y-2">
+          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mx-auto"></div>
+          <p className="text-xs text-slate-400 font-medium">配置管理データベースを構築しています...</p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-slate-50 flex flex-col font-sans" id="app-root">
+      
+      {/* 上部ヘッダー（印刷時は非表示） */}
+      <header className="bg-white border-b border-slate-200 sticky top-0 z-50 print:hidden shadow-sm" id="app-header">
+        <div className="max-w-7xl mx-auto px-4 h-16 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <span className="p-2 bg-blue-600 rounded-xl text-white inline-flex shadow-sm">
+              <Calendar className="h-4.5 w-4.5" />
+            </span>
+            <div>
+              <h1 className="text-sm font-bold text-slate-900 tracking-tight">宿泊型自立訓練 勤務配置管理システム</h1>
+              <span className="text-[10px] text-slate-400 block font-medium">指定監査基準適合判定 ＆ FTE常勤換算 ＆ オンコール記録簿</span>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-3">
+            {/* 権限ロールセレクター */}
+            <div className="flex items-center gap-1.5 bg-slate-100 px-3 py-1.5 rounded-lg border border-slate-200">
+              <label className="text-[10px] font-bold text-slate-500 uppercase tracking-tight">権限:</label>
+              <select
+                value={userRole}
+                onChange={e => handleUpdateRole(e.target.value as any)}
+                className="bg-transparent text-xs font-bold text-slate-800 focus:outline-none cursor-pointer pr-1"
+                id="header-role-selector"
+              >
+                <option value="Admin">統括管理者 (Admin)</option>
+                <option value="Manager">施設長・サビ管 (Manager)</option>
+                <option value="Staff">一般生活支援員 (Staff)</option>
+                <option value="Viewer">監査・外部閲覧 (Viewer)</option>
+              </select>
+            </div>
+
+            {/* 年月選択クイックトリガー (＜・＞ ボタン付き) */}
+            <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-lg border border-slate-200">
+              <button
+                onClick={handlePrevYear}
+                title="前年 (<<)"
+                className="p-1 hover:bg-slate-200 rounded text-slate-500 cursor-pointer transition-colors"
+              >
+                <ChevronsLeft className="h-3.5 w-3.5" />
+              </button>
+              <button
+                onClick={handlePrevMonth}
+                title="前月 (<)"
+                className="p-1 hover:bg-slate-200 rounded text-slate-500 cursor-pointer transition-colors mr-0.5"
+              >
+                <ChevronLeft className="h-3.5 w-3.5" />
+              </button>
+
+              <div className="flex items-center bg-white px-2.5 py-1 rounded border border-slate-200 shadow-3xs">
+                <input 
+                  type="month"
+                  value={targetYearMonth}
+                  onChange={e => setTargetYearMonth(e.target.value)}
+                  className="bg-transparent text-xs font-bold font-mono text-slate-900 focus:outline-none cursor-pointer text-center w-24"
+                />
+              </div>
+
+              <button
+                onClick={handleNextMonth}
+                title="翌月 (>)"
+                className="p-1 hover:bg-slate-200 rounded text-slate-500 cursor-pointer transition-colors ml-0.5"
+              >
+                <ChevronRight className="h-3.5 w-3.5" />
+              </button>
+              <button
+                onClick={handleNextYear}
+                title="翌年 (>>)"
+                className="p-1 hover:bg-slate-200 rounded text-slate-500 cursor-pointer transition-colors"
+              >
+                <ChevronsRight className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      {/* メイングリッド */}
+      <main className="max-w-7xl w-full mx-auto px-4 py-6 flex-1 flex flex-col md:flex-row gap-6">
+        
+        {/* 左サイドナビゲーション（印刷時は非表示） */}
+        <nav className="md:w-60 shrink-0 space-y-1 print:hidden" id="navigation-sidebar">
+          <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider px-3 pb-1">業務ダッシュボード</div>
+          
+          <button
+            onClick={() => setActiveTab('dashboard')}
+            className={`w-full text-left px-3 py-2 rounded-lg text-xs font-semibold flex items-center gap-2.5 transition-all cursor-pointer ${
+              activeTab === 'dashboard' 
+                ? 'bg-blue-600 text-white shadow-xs' 
+                : 'text-slate-600 hover:bg-slate-200/60 hover:text-slate-900'
+            }`}
+          >
+            <LayoutDashboard className="h-4 w-4 shrink-0" />
+            <span>総合ダッシュボード</span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab('roster-input')}
+            className={`w-full text-left px-3 py-2 rounded-lg text-xs font-semibold flex items-center gap-2.5 transition-all cursor-pointer ${
+              activeTab === 'roster-input' 
+                ? 'bg-blue-600 text-white shadow-xs' 
+                : 'text-slate-600 hover:bg-slate-200/60 hover:text-slate-900'
+            }`}
+          >
+            <CheckSquare className="h-4 w-4 shrink-0" />
+            <span>勤務シフト入力</span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab('shift-generator')}
+            className={`w-full text-left px-3 py-2 rounded-lg text-xs font-bold flex items-center gap-2.5 transition-all cursor-pointer ${
+              activeTab === 'shift-generator' 
+                ? 'bg-indigo-600 text-white shadow-xs' 
+                : 'text-indigo-600 bg-indigo-50/50 hover:bg-indigo-100 hover:text-indigo-900 border border-indigo-100/30'
+            }`}
+          >
+            <Sparkles className="h-4 w-4 text-amber-500 animate-pulse shrink-0" />
+            <span>シフト自動生成（作成案）</span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab('shift-requests')}
+            className={`w-full text-left px-3 py-2 rounded-lg text-xs font-semibold flex items-center gap-2.5 transition-all cursor-pointer ${
+              activeTab === 'shift-requests' 
+                ? 'bg-blue-600 text-white shadow-xs' 
+                : 'text-slate-600 hover:bg-slate-200/60 hover:text-slate-900'
+            }`}
+          >
+            <CheckSquare className="h-4 w-4 shrink-0" />
+            <span>希望申請・監査調停</span>
+            <span className="ml-auto text-[9px] bg-rose-500 text-white px-1.5 py-0.5 rounded-full font-bold">New</span>
+          </button>
+
+          <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider px-3 pt-4 pb-1">監査配置・法令検証</div>
+
+          <button
+            onClick={() => setActiveTab('daily-check')}
+            className={`w-full text-left px-3 py-2 rounded-lg text-xs font-semibold flex items-center gap-2.5 transition-all cursor-pointer ${
+              activeTab === 'daily-check' 
+                ? 'bg-blue-600 text-white shadow-xs' 
+                : 'text-slate-600 hover:bg-slate-200/60 hover:text-slate-900'
+            }`}
+          >
+            <ShieldAlert className="h-4 w-4 shrink-0" />
+            <span>日別実配置確認</span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab('fte-calc')}
+            className={`w-full text-left px-3 py-2 rounded-lg text-xs font-semibold flex items-center gap-2.5 transition-all cursor-pointer ${
+              activeTab === 'fte-calc' 
+                ? 'bg-blue-600 text-white shadow-xs' 
+                : 'text-slate-600 hover:bg-slate-200/60 hover:text-slate-900'
+            }`}
+          >
+            <CheckSquare className="h-4 w-4 shrink-0" />
+            <span>月間常勤換算 (FTE)</span>
+          </button>
+
+          <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider px-3 pt-4 pb-1">オンコール管理</div>
+
+          <button
+            onClick={() => setActiveTab('oncall-log')}
+            className={`w-full text-left px-3 py-2 rounded-lg text-xs font-semibold flex items-center gap-2.5 transition-all cursor-pointer ${
+              activeTab === 'oncall-log' 
+                ? 'bg-blue-600 text-white shadow-xs' 
+                : 'text-slate-600 hover:bg-slate-200/60 hover:text-slate-900'
+            }`}
+          >
+            <PhoneCall className="h-4 w-4 shrink-0" />
+            <span>オンコール当座・対応簿</span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab('oncall-report')}
+            className={`w-full text-left px-3 py-2 rounded-lg text-xs font-semibold flex items-center gap-2.5 transition-all cursor-pointer ${
+              activeTab === 'oncall-report' 
+                ? 'bg-blue-600 text-white shadow-xs' 
+                : 'text-slate-600 hover:bg-slate-200/60 hover:text-slate-900'
+            }`}
+          >
+            <Printer className="h-4 w-4 shrink-0" />
+            <span>オンコール総務提出帳票</span>
+          </button>
+
+          <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider px-3 pt-4 pb-1">データエクスポート</div>
+
+          <button
+            onClick={() => setActiveTab('excel-export')}
+            className={`w-full text-left px-3 py-2 rounded-lg text-xs font-semibold flex items-center gap-2.5 transition-all cursor-pointer ${
+              activeTab === 'excel-export' 
+                ? 'bg-blue-600 text-white shadow-xs' 
+                : 'text-slate-600 hover:bg-slate-200/60 hover:text-slate-900'
+            }`}
+          >
+            <FileSpreadsheet className="h-4 w-4 shrink-0" />
+            <span>Excel 監査帳票出力</span>
+          </button>
+
+          <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider px-3 pt-4 pb-1">マスターメンテナンス</div>
+
+          <button
+            onClick={() => setActiveTab('staff-master')}
+            className={`w-full text-left px-3 py-2 rounded-lg text-xs font-semibold flex items-center gap-2.5 transition-all cursor-pointer ${
+              activeTab === 'staff-master' 
+                ? 'bg-blue-600 text-white shadow-xs' 
+                : 'text-slate-600 hover:bg-slate-200/60 hover:text-slate-900'
+            }`}
+          >
+            <Users className="h-4 w-4 shrink-0" />
+            <span>職員マスタ</span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab('shift-master')}
+            className={`w-full text-left px-3 py-2 rounded-lg text-xs font-semibold flex items-center gap-2.5 transition-all cursor-pointer ${
+              activeTab === 'shift-master' 
+                ? 'bg-blue-600 text-white shadow-xs' 
+                : 'text-slate-600 hover:bg-slate-200/60 hover:text-slate-900'
+            }`}
+          >
+            <Tags className="h-4 w-4 shrink-0" />
+            <span>勤務区分記号</span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab('facility-settings')}
+            className={`w-full text-left px-3 py-2 rounded-lg text-xs font-semibold flex items-center gap-2.5 transition-all cursor-pointer ${
+              activeTab === 'facility-settings' 
+                ? 'bg-blue-600 text-white shadow-xs' 
+                : 'text-slate-600 hover:bg-slate-200/60 hover:text-slate-900'
+            }`}
+          >
+            <Sliders className="h-4 w-4 shrink-0" />
+            <span>施設基準・年月設定</span>
+          </button>
+        </nav>
+
+        {/* 右メインビューポート */}
+        <div className="flex-1 min-w-0" id="main-viewport-content">
+          {activeTab === 'dashboard' && (
+            <Dashboard 
+              settings={settings}
+              staffList={staffList}
+              complianceResults={complianceResults}
+              fteResult={fteResult}
+              setActiveTab={setActiveTab}
+              isActualMode={isActualMode}
+              setIsActualMode={setIsActualMode}
+            />
+          )}
+
+          {activeTab === 'roster-input' && (
+            <MonthlyRoster 
+              settings={settings}
+              staffList={staffList}
+              shifts={shifts}
+              rosters={rosters}
+              onUpdateRosters={handleUpdateRosters}
+              isActualMode={isActualMode}
+              setIsActualMode={setIsActualMode}
+              userRole={userRole}
+              onTriggerAutoGenerate={() => setActiveTab('shift-generator')}
+            />
+          )}
+
+          {activeTab === 'shift-generator' && (
+            <ShiftGeneratorDraft
+              settings={settings}
+              staffList={staffList}
+              shifts={shifts}
+              rosters={rosters}
+              onCallData={onCallData}
+              onApplySchedule={(newRosters, newOnCall) => {
+                setRosters(newRosters);
+                localStorage.setItem(`roster_app_rosters_${targetYearMonth}`, JSON.stringify(newRosters));
+                setOnCallData(newOnCall);
+                localStorage.setItem(`roster_app_oncall_${targetYearMonth}`, JSON.stringify(newOnCall));
+                setIsActualMode(false); // Switch to planned mode to see generated results
+                setActiveTab('roster-input');
+                alert('自動生成されたシフト案を【勤務予定表（予定）】へ正常に反映しました！「日別実配置確認」や「月間常勤換算」画面で検証結果をご確認ください。');
+              }}
+              onCancel={() => {
+                setActiveTab('roster-input');
+              }}
+            />
+          )}
+
+          {activeTab === 'shift-requests' && (
+            <ShiftRequestsManager
+              settings={settings}
+              staffList={staffList}
+              rosters={rosters}
+              onCallData={onCallData}
+              requests={requests}
+              onUpdateRequests={handleUpdateRequests}
+              userRole={userRole}
+              onUpdateRosters={handleUpdateRosters}
+              onUpdateOnCall={handleUpdateOnCall}
+            />
+          )}
+
+          {activeTab === 'daily-check' && (
+            <DailyCompliance 
+              settings={settings}
+              staffList={staffList}
+              complianceResults={complianceResults}
+              isActualMode={isActualMode}
+            />
+          )}
+
+          {activeTab === 'fte-calc' && (
+            <FTECalculation 
+              settings={settings}
+              fteResult={fteResult}
+              isActualMode={isActualMode}
+            />
+          )}
+
+          {activeTab === 'oncall-log' && (
+            <OnCallLog 
+              settings={settings}
+              staffList={staffList}
+              onCallData={onCallData}
+              onUpdateOnCall={handleUpdateOnCall}
+              userRole={userRole}
+            />
+          )}
+
+          {activeTab === 'oncall-report' && (
+            <OnCallReport 
+              settings={settings}
+              staffList={staffList}
+              onCallData={onCallData}
+            />
+          )}
+
+          {activeTab === 'excel-export' && (
+            <ExcelExport 
+              settings={settings}
+              staffList={staffList}
+              shifts={shifts}
+              rosters={rosters}
+              onCallData={onCallData}
+              complianceResults={complianceResults}
+              fteResult={fteResult}
+            />
+          )}
+
+          {activeTab === 'staff-master' && (
+            <StaffMaster 
+              staffList={staffList}
+              onUpdate={handleUpdateStaff}
+              userRole={userRole}
+            />
+          )}
+
+          {activeTab === 'shift-master' && (
+            <ShiftCategoryMaster 
+              shifts={shifts}
+              onUpdate={handleUpdateShifts}
+            />
+          )}
+
+          {activeTab === 'facility-settings' && (
+            <FacilitySettings 
+              settings={settings}
+              onSave={handleUpdateSettings}
+              resetAllToDefault={resetAllToDefault}
+            />
+          )}
+        </div>
+      </main>
+
+      {/* フッター */}
+      <footer className="bg-white border-t border-gray-200 py-4 text-center text-xs text-gray-400 print:hidden mt-12 gap-1 flex items-center justify-center">
+        <span>© 2026 そよかぜ自立支援ホーム - 宿泊型自立訓練 勤務配置証明 & 監査決裁システム</span>
+      </footer>
+    </div>
+  );
+}
